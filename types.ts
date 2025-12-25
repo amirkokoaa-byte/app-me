@@ -43,8 +43,10 @@ export interface ChatMessage {
   id: string;
   fromUserId: string;
   fromUsername: string;
+  toUserId: string; // 'all' or specific userId
   text: string;
   timestamp: string;
+  serverTime: number;
 }
 
 export enum AppTab {

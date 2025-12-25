@@ -1,57 +1,58 @@
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   Wallet, Calendar, Clock, Plus, Trash2, Archive, TrendingDown, 
   LayoutDashboard, ShieldCheck, ChevronLeft, Settings, UserPlus, 
   LogOut, CheckCircle2, MessageCircle, Send, X, Edit3, UserCircle,
   Sun, Moon, Laptop, Leaf, Lock, User as UserIcon, Eye, EyeOff,
-  Palette, KeyRound, Menu
+  Palette, KeyRound, Menu, Users, ShieldAlert
 } from 'lucide-react';
 import { 
   Expense, Commitment, MonthlyRecord, AppTab, 
   User, ThemeType, ChatMessage 
 } from './types';
+import { db, ref, set, onValue, push, remove, update } from './firebase';
 
-// Constants
 const DEFAULT_EXPENSE_CATEGORIES = ['المياه', 'الغاز', 'الكهرباء', 'الانترنت المنزلي', 'الخط الارضي', 'جمعيات', 'اقساط بنك'];
 const COMMITMENT_TYPES = ['جمعيات', 'اقساط بنك', 'التزامات اخرى'];
 const EMOJIS = ['😊', '💰', '📉', '📊', '✅', '❌', '🏡', '💳', '💡'];
 
 const App: React.FC = () => {
-  // --- Auth State ---
+  // --- Auth & Users ---
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [users, setUsers] = useState<User[]>([]);
   const [loginForm, setLoginForm] = useState({ username: '', password: '' });
   const [showPassword, setShowPassword] = useState(false);
 
-  // --- Theme State ---
+  // --- Theme & Layout ---
   const [theme, setTheme] = useState<ThemeType>('modern-light');
-
-  // --- Layout State ---
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
-  // --- Main Data State ---
-  const [activeTab, setActiveTab] = useState<AppTab>(AppTab.MONTHLY_EXPENSES);
-  const [time, setTime] = useState(new Date());
+  // --- Financial Data (Synced with Firebase) ---
   const [salary, setSalary] = useState<number>(0);
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [commitments, setCommitments] = useState<Commitment[]>([]);
   const [history, setHistory] = useState<MonthlyRecord[]>([]);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
 
-  // --- UI Modals/Local State ---
+  // --- Chat State ---
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [isChatOpen, setIsChatOpen] = useState(false);
+  const [chatInput, setChatInput] = useState('');
+  const [chatRecipient, setChatRecipient] = useState<string>('all'); // 'all' or userId
+  const chatEndRef = useRef<HTMLDivElement>(null);
+
+  // --- Modals ---
+  const [activeTab, setActiveTab] = useState<AppTab>(AppTab.MONTHLY_EXPENSES);
+  const [time, setTime] = useState(new Date());
   const [isExpenseModalOpen, setIsExpenseModalOpen] = useState(false);
   const [isCommitmentModalOpen, setIsCommitmentModalOpen] = useState(false);
-  const [isChatOpen, setIsChatOpen] = useState(false);
   const [isSettingsUserModalOpen, setIsSettingsUserModalOpen] = useState(false);
-  
   const [selectedCategory, setSelectedCategory] = useState(DEFAULT_EXPENSE_CATEGORIES[0]);
   const [isAddingCustomCategory, setIsAddingCustomCategory] = useState(false);
   const [tempExpense, setTempExpense] = useState({ value: '', date: '', name: '' });
   const [tempCommitment, setTempCommitment] = useState({ 
     totalValue: '', installmentsCount: '', paidAmount: '', duration: '', date: '', type: '' 
   });
-  const [chatInput, setChatInput] = useState('');
   const [editUserForm, setEditUserForm] = useState<Partial<User>>({});
   const [newPassword, setNewPassword] = useState('');
 
@@ -61,63 +62,62 @@ const App: React.FC = () => {
     return () => clearInterval(timer);
   }, []);
 
-  // --- Initial Load ---
+  // --- Firebase: Global Sync (Users & Messages) ---
   useEffect(() => {
-    const savedUsers = localStorage.getItem('sp_users');
-    if (!savedUsers) {
-      const initialUsers = [{ id: '1', username: 'admin', password: 'admin', isAdmin: true }];
-      localStorage.setItem('sp_users', JSON.stringify(initialUsers));
-      setUsers(initialUsers);
-    } else {
-      setUsers(JSON.parse(savedUsers));
-    }
+    const usersRef = ref(db, 'users');
+    onValue(usersRef, (snapshot) => {
+      const data = snapshot.val();
+      if (data) {
+        const usersList = Object.values(data) as User[];
+        setUsers(usersList);
+      } else {
+        // Create initial admin if no users exist
+        const initialAdmin = { id: 'admin_1', username: 'admin', password: 'admin', isAdmin: true };
+        set(ref(db, 'users/admin_1'), initialAdmin);
+      }
+    });
 
-    const savedGlobalData = JSON.parse(localStorage.getItem('sp_global_data') || '{}');
-    if (savedGlobalData.messages) setMessages(savedGlobalData.messages);
+    const msgsRef = ref(db, 'messages');
+    onValue(msgsRef, (snapshot) => {
+      const data = snapshot.val();
+      if (data) {
+        const msgsList = Object.keys(data).map(key => ({ ...data[key], id: key })) as ChatMessage[];
+        setMessages(msgsList.sort((a, b) => a.serverTime - b.serverTime));
+      } else {
+        setMessages([]);
+      }
+    });
   }, []);
 
-  // --- Load User Data when logged in ---
+  // --- Firebase: User Data Sync ---
   useEffect(() => {
     if (currentUser) {
-      const userData = JSON.parse(localStorage.getItem(`sp_data_${currentUser.id}`) || '{}');
-      setSalary(userData.salary || 0);
-      setExpenses(userData.expenses || []);
-      setCommitments(userData.commitments || []);
-      setHistory(userData.history || []);
-      setTheme(userData.theme || 'modern-light');
+      const userDataRef = ref(db, `data/${currentUser.id}`);
+      onValue(userDataRef, (snapshot) => {
+        const data = snapshot.val();
+        if (data) {
+          setSalary(data.salary || 0);
+          setExpenses(data.expenses || []);
+          setCommitments(data.commitments || []);
+          setHistory(data.history || []);
+          setTheme(data.theme || 'modern-light');
+        }
+      });
     }
   }, [currentUser]);
 
-  // --- Save Logic ---
-  const saveUserData = () => {
+  // --- Auto-scroll Chat ---
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages, isChatOpen]);
+
+  // --- Sync Handlers ---
+  const syncFinancialData = (updates: any) => {
     if (currentUser) {
-      localStorage.setItem(`sp_data_${currentUser.id}`, JSON.stringify({ salary, expenses, commitments, history, theme }));
+      update(ref(db, `data/${currentUser.id}`), updates);
     }
-    localStorage.setItem('sp_users', JSON.stringify(users));
-    localStorage.setItem('sp_global_data', JSON.stringify({ messages }));
   };
 
-  useEffect(() => {
-    saveUserData();
-  }, [salary, expenses, commitments, history, theme, users, messages, currentUser]);
-
-  // --- Derived Calculations ---
-  const userExpenses = useMemo(() => expenses.filter(e => !e.isPaid), [expenses]);
-  const totalExpensesVal = useMemo(() => userExpenses.reduce((sum, e) => sum + e.value, 0), [userExpenses]);
-  const balance = salary - totalExpensesVal;
-
-  const totalCommitmentValue = useMemo(() => commitments.reduce((sum, c) => sum + c.totalValue, 0), [commitments]);
-  const totalCommitmentRemaining = useMemo(() => commitments.reduce((sum, c) => sum + c.remainingAmount, 0), [commitments]);
-
-  // Check for due dates today
-  const hasDueToday = useMemo(() => {
-    const today = new Date().toISOString().split('T')[0];
-    const expDue = expenses.some(e => e.dueDate === today && !e.isPaid);
-    const comDue = commitments.some(c => c.date === today && !c.isCompleted);
-    return expDue || comDue;
-  }, [expenses, commitments]);
-
-  // --- Handlers ---
   const handleLogin = (e: React.FormEvent) => {
     e.preventDefault();
     const user = users.find(u => u.username === loginForm.username && u.password === loginForm.password);
@@ -126,14 +126,6 @@ const App: React.FC = () => {
     } else {
       alert('خطأ في اسم المستخدم أو كلمة المرور');
     }
-  };
-
-  const handleChangePassword = () => {
-    if (!newPassword) return;
-    const updatedUsers = users.map(u => u.id === currentUser?.id ? { ...u, password: newPassword } : u);
-    setUsers(updatedUsers);
-    setNewPassword('');
-    alert('تم تغيير كلمة المرور بنجاح');
   };
 
   const handleAddExpense = () => {
@@ -147,9 +139,17 @@ const App: React.FC = () => {
       isPaid: false,
       userId: currentUser!.id
     };
-    setExpenses([...expenses, newExp]);
+    const newExpenses = [...expenses, newExp];
+    setExpenses(newExpenses);
+    syncFinancialData({ expenses: newExpenses });
     setIsExpenseModalOpen(false);
     setTempExpense({ value: '', date: '', name: '' });
+  };
+
+  const deleteExpense = (id: string) => {
+    const updated = expenses.filter(e => e.id !== id);
+    setExpenses(updated);
+    syncFinancialData({ expenses: updated });
   };
 
   const handleAddCommitment = () => {
@@ -167,58 +167,45 @@ const App: React.FC = () => {
       userId: currentUser!.id,
       isCompleted: total - paid <= 0
     };
-    setCommitments([...commitments, newCom]);
+    const updated = [...commitments, newCom];
+    setCommitments(updated);
+    syncFinancialData({ commitments: updated });
     setIsCommitmentModalOpen(false);
     setTempCommitment({ totalValue: '', installmentsCount: '', paidAmount: '', duration: '', date: '', type: '' });
   };
 
-  const togglePaidExpense = (id: string) => {
-    setExpenses(expenses.map(e => e.id === id ? { ...e, isPaid: true } : e));
-  };
-
-  const payCommitmentInstallment = (id: string) => {
-    setCommitments(commitments.map(c => {
-      if (c.id === id) {
-        const installmentValue = c.totalValue / c.installmentsCount;
-        const newPaid = Math.min(c.paidAmount + installmentValue, c.totalValue);
-        return { ...c, paidAmount: newPaid, remainingAmount: c.totalValue - newPaid, isCompleted: c.totalValue - newPaid <= 0 };
-      }
-      return c;
-    }));
-  };
-
-  const deleteCommitment = (id: string) => {
-    setCommitments(commitments.filter(c => c.id !== id));
-  };
-
   const sendChatMessage = () => {
-    if (!chatInput.trim()) return;
-    const newMsg: ChatMessage = {
-      id: Date.now().toString(),
-      fromUserId: currentUser!.id,
-      fromUsername: currentUser!.username,
+    if (!chatInput.trim() || !currentUser) return;
+    const newMsgRef = push(ref(db, 'messages'));
+    const newMsg: Partial<ChatMessage> = {
+      fromUserId: currentUser.id,
+      fromUsername: currentUser.username,
+      toUserId: chatRecipient,
       text: chatInput,
-      timestamp: new Date().toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })
+      timestamp: new Date().toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' }),
+      serverTime: Date.now()
     };
-    setMessages([...messages, newMsg]);
+    set(newMsgRef, newMsg);
     setChatInput('');
   };
 
-  // --- Themes CSS Mapping ---
+  const deleteMessage = (msgId: string) => {
+    remove(ref(db, `messages/${msgId}`));
+  };
+
+  // --- Themes & Helpers ---
   const themeClasses = {
     'modern-light': "bg-slate-50 text-slate-900 border-slate-200",
     'dark-classic': "bg-black text-white border-black",
     'deep-ocean': "bg-[#0f172a] text-blue-50 border-blue-900",
     'royal-gold': "bg-[#1c1917] text-[#fef3c7] border-[#44403c]"
   };
-
   const sidebarClasses = {
     'modern-light': "bg-white border-slate-200",
     'dark-classic': "bg-black border-black",
     'deep-ocean': "bg-[#1e293b] border-blue-950",
     'royal-gold': "bg-[#292524] border-[#44403c]"
   };
-
   const cardClasses = {
     'modern-light': "bg-white border-slate-100 shadow-sm",
     'dark-classic': "bg-[#0a0a0a] border-[#222] shadow-none",
@@ -226,533 +213,288 @@ const App: React.FC = () => {
     'royal-gold': "bg-[#292524] border-[#44403c]"
   };
 
-  // --- Render Login ---
+  const filteredMessages = messages.filter(msg => {
+    if (chatRecipient === 'all') return msg.toUserId === 'all';
+    // If specific recipient, show only private messages between current user and that recipient
+    return (msg.fromUserId === currentUser?.id && msg.toUserId === chatRecipient) ||
+           (msg.fromUserId === chatRecipient && msg.toUserId === currentUser?.id);
+  });
+
+  const userExpensesCount = expenses.filter(e => !e.isPaid).length;
+  const totalExpensesVal = expenses.filter(e => !e.isPaid).reduce((sum, e) => sum + e.value, 0);
+  const balance = salary - totalExpensesVal;
+  const totalCommitmentRemaining = commitments.reduce((sum, c) => sum + c.remainingAmount, 0);
+
   if (!currentUser) {
     return (
       <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4 font-['Cairo'] relative overflow-hidden">
-        <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-blue-600/20 rounded-full blur-[120px] animate-pulse"></div>
-        <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-emerald-600/20 rounded-full blur-[120px] animate-pulse delay-700"></div>
         <div className="bg-white/95 backdrop-blur-xl w-full max-w-[480px] rounded-[2rem] md:rounded-[3rem] shadow-2xl p-8 md:p-14 text-center z-10 border border-white/20 animate-in fade-in zoom-in-95 duration-700">
-          <div className="inline-flex bg-gradient-to-tr from-blue-600 to-blue-400 w-16 h-16 md:w-24 md:h-24 rounded-[1.5rem] md:rounded-[2rem] items-center justify-center mb-6 md:mb-10 shadow-2xl shadow-blue-500/30">
+          <div className="inline-flex bg-gradient-to-tr from-blue-600 to-blue-400 w-16 h-16 md:w-24 md:h-24 rounded-[1.5rem] md:rounded-[2rem] items-center justify-center mb-6 md:mb-10 shadow-2xl">
             <Wallet className="text-white" size={32} />
           </div>
-          <div className="mb-6 md:mb-10">
-            <h1 className="text-3xl md:text-4xl font-black text-slate-900 mb-2 tracking-tight">Smart Prise</h1>
-            <p className="text-slate-500 font-medium text-sm md:text-base">سجل دخولك لإدارة ميزانيتك</p>
-          </div>
+          <h1 className="text-3xl md:text-4xl font-black text-slate-900 mb-2">Smart Prise</h1>
+          <p className="text-slate-500 mb-10">سجل دخولك لإدارة ميزانيتك السحابية</p>
           <form onSubmit={handleLogin} className="space-y-4 md:space-y-6">
-            <div className="text-right space-y-1 md:space-y-2">
-              <label className="text-[10px] md:text-[11px] font-black text-slate-400 pr-4 uppercase tracking-widest">اسم المستخدم</label>
+            <div className="text-right space-y-2">
+              <label className="text-[11px] font-black text-slate-400 pr-4 uppercase tracking-widest">اسم المستخدم</label>
               <div className="relative">
-                <input 
-                  className="w-full bg-slate-50 border border-slate-200 rounded-xl md:rounded-2xl py-3 md:py-4 px-6 pr-12 md:pr-14 outline-none focus:ring-2 focus:ring-blue-500 transition-all text-base md:text-lg font-bold"
-                  value={loginForm.username}
-                  onChange={e => setLoginForm({...loginForm, username: e.target.value})}
-                  required
-                  placeholder="admin"
-                />
-                <UserIcon className="absolute top-1/2 right-4 md:right-5 -translate-y-1/2 text-slate-400" size={18} />
+                <input className="w-full bg-slate-50 border border-slate-200 rounded-xl py-4 px-6 pr-14 outline-none focus:ring-2 focus:ring-blue-500 transition-all font-bold" value={loginForm.username} onChange={e => setLoginForm({...loginForm, username: e.target.value})} required placeholder="أدخل اسم المستخدم" />
+                <UserIcon className="absolute top-1/2 right-5 -translate-y-1/2 text-slate-400" size={18} />
               </div>
             </div>
-            <div className="text-right space-y-1 md:space-y-2">
-              <label className="text-[10px] md:text-[11px] font-black text-slate-400 pr-4 uppercase tracking-widest">كلمة المرور</label>
+            <div className="text-right space-y-2">
+              <label className="text-[11px] font-black text-slate-400 pr-4 uppercase tracking-widest">كلمة المرور</label>
               <div className="relative">
-                <input 
-                  type={showPassword ? "text" : "password"}
-                  className="w-full bg-slate-50 border border-slate-200 rounded-xl md:rounded-2xl py-3 md:py-4 px-6 pr-12 md:pr-14 outline-none focus:ring-2 focus:ring-blue-500 transition-all text-base md:text-lg font-bold"
-                  value={loginForm.password}
-                  onChange={e => setLoginForm({...loginForm, password: e.target.value})}
-                  required
-                  placeholder="admin"
-                />
-                <Lock className="absolute top-1/2 right-4 md:right-5 -translate-y-1/2 text-slate-400" size={18} />
-                <button type="button" onClick={() => setShowPassword(!showPassword)} className="absolute top-1/2 left-4 md:left-5 -translate-y-1/2 text-slate-400">
-                  {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
-                </button>
+                <input type={showPassword ? "text" : "password"} className="w-full bg-slate-50 border border-slate-200 rounded-xl py-4 px-6 pr-14 outline-none focus:ring-2 focus:ring-blue-500 transition-all font-bold" value={loginForm.password} onChange={e => setLoginForm({...loginForm, password: e.target.value})} required placeholder="••••••••" />
+                <Lock className="absolute top-1/2 right-5 -translate-y-1/2 text-slate-400" size={18} />
+                <button type="button" onClick={() => setShowPassword(!showPassword)} className="absolute top-1/2 left-5 -translate-y-1/2 text-slate-400">{showPassword ? <EyeOff size={18} /> : <Eye size={18} />}</button>
               </div>
             </div>
-            <button className="w-full bg-slate-900 text-white font-black py-4 md:py-5 rounded-xl md:rounded-2xl hover:bg-blue-600 transition-all shadow-xl active:scale-[0.98]">
-              دخول للنظام
-            </button>
+            <button className="w-full bg-slate-900 text-white font-black py-5 rounded-xl hover:bg-blue-600 transition-all shadow-xl">دخول للنظام</button>
           </form>
         </div>
       </div>
     );
   }
 
-  const SidebarContent = () => (
-    <div className="flex flex-col h-full">
-      <div className="p-6 md:p-8 border-b border-white/5 bg-blue-600 text-white flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="bg-white/20 p-2 rounded-xl"><Wallet size={24} /></div>
-          <h1 className="text-xl font-black tracking-tight">Smart Prise</h1>
-        </div>
-        <button onClick={() => setIsSidebarOpen(false)} className="lg:hidden p-2 hover:bg-white/10 rounded-lg">
-          <X size={24} />
-        </button>
-      </div>
-      
-      <nav className="flex-1 p-4 md:p-6 space-y-2 md:space-y-3 overflow-y-auto">
-        {[
-          { id: AppTab.MONTHLY_EXPENSES, icon: LayoutDashboard, label: 'المصروفات الشهرية' },
-          { id: AppTab.COMMITMENTS, icon: ShieldCheck, label: 'الالتزامات', alert: hasDueToday },
-          { id: AppTab.PREVIOUS_MONTHS, icon: Archive, label: 'الأرشيف' },
-          { id: AppTab.SETTINGS, icon: Settings, label: 'الإعدادات' }
-        ].map(tab => (
-          <button 
-            key={tab.id}
-            onClick={() => {
-              setActiveTab(tab.id);
-              if (window.innerWidth < 1024) setIsSidebarOpen(false);
-            }}
-            className={`w-full flex items-center justify-between gap-3 px-4 md:px-5 py-3 md:py-4 rounded-xl md:rounded-2xl transition-all ${
-              activeTab === tab.id 
-                ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/20 scale-105 font-bold' 
-                : tab.alert ? 'bg-red-500 text-white animate-pulse' : 'text-slate-500 hover:bg-white/5'
-            }`}
-          >
-            <div className="flex items-center gap-3">
-              <tab.icon size={20} />
-              <span className="text-sm md:text-base">{tab.label}</span>
-            </div>
-            {tab.alert && <div className="w-2 h-2 bg-white rounded-full"></div>}
-          </button>
-        ))}
-      </nav>
-
-      <div className={`p-6 md:p-8 border-t border-white/5 space-y-3 md:space-y-4 ${theme === 'dark-classic' ? 'bg-black' : ''}`}>
-        <div className="flex items-center gap-3 text-slate-500">
-          <Calendar size={18} />
-          <span className="text-xs md:text-sm font-medium">{time.toLocaleDateString('ar-EG', { weekday: 'long', day: 'numeric', month: 'long' })}</span>
-        </div>
-        <div className={`flex items-center gap-3 font-black ${theme === 'dark-classic' ? 'text-white' : 'text-blue-600'}`}>
-          <Clock size={18} />
-          <span className="text-xl md:text-2xl tabular-nums" dir="ltr">{time.toLocaleTimeString('ar-EG', { hour12: true, hour: '2-digit', minute: '2-digit' })}</span>
-        </div>
-        <button onClick={() => setCurrentUser(null)} className="w-full flex items-center gap-3 text-red-400 hover:text-red-500 text-xs md:text-sm font-bold pt-4 border-t border-white/5">
-          <LogOut size={16} />
-          <span>خروج ({currentUser.username})</span>
-        </button>
-      </div>
-    </div>
-  );
-
   return (
     <div className={`flex h-screen overflow-hidden transition-colors duration-300 font-['Cairo'] ${themeClasses[theme]}`}>
       
-      {/* Desktop Sidebar */}
+      {/* Sidebar Content */}
       <aside className={`hidden lg:flex lg:w-72 flex-col shadow-xl z-20 transition-colors duration-300 ${sidebarClasses[theme]}`}>
-        <SidebarContent />
-      </aside>
-
-      {/* Mobile Sidebar Overlay */}
-      {isSidebarOpen && (
-        <div className="lg:hidden fixed inset-0 z-[100] flex">
-          <div className="fixed inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setIsSidebarOpen(false)}></div>
-          <div className={`relative w-72 h-full flex flex-col shadow-2xl animate-in slide-in-from-right duration-300 ${sidebarClasses[theme]}`}>
-            <SidebarContent />
-          </div>
+        <div className="p-8 bg-blue-600 text-white flex items-center gap-3">
+          <Wallet size={24} />
+          <h1 className="text-xl font-black">Smart Prise</h1>
         </div>
-      )}
+        <nav className="flex-1 p-6 space-y-3">
+          {[
+            { id: AppTab.MONTHLY_EXPENSES, icon: LayoutDashboard, label: 'المصروفات' },
+            { id: AppTab.COMMITMENTS, icon: ShieldCheck, label: 'الالتزامات' },
+            { id: AppTab.PREVIOUS_MONTHS, icon: Archive, label: 'الأرشيف' },
+            { id: AppTab.SETTINGS, icon: Settings, label: 'الإعدادات' }
+          ].map(tab => (
+            <button key={tab.id} onClick={() => setActiveTab(tab.id)} className={`w-full flex items-center gap-3 px-5 py-4 rounded-2xl transition-all ${activeTab === tab.id ? 'bg-blue-600 text-white shadow-lg' : 'text-slate-500 hover:bg-white/5'}`}>
+              <tab.icon size={20} />
+              <span className="font-bold">{tab.label}</span>
+            </button>
+          ))}
+        </nav>
+        <div className="p-8 border-t border-white/5 space-y-4">
+          <div className="flex items-center gap-3 text-slate-500 text-sm"><Calendar size={16}/> {time.toLocaleDateString('ar-EG', { day: 'numeric', month: 'long' })}</div>
+          <div className="text-2xl font-black text-blue-600" dir="ltr">{time.toLocaleTimeString('ar-EG', { hour12: true, hour: '2-digit', minute: '2-digit' })}</div>
+          <button onClick={() => setCurrentUser(null)} className="text-red-400 font-bold flex items-center gap-2 pt-4 border-t border-white/5"><LogOut size={16}/> خروج</button>
+        </div>
+      </aside>
 
       {/* Main Content */}
       <main className="flex-1 flex flex-col overflow-hidden relative">
-        
-        {/* Top Header */}
-        <header className={`p-4 md:p-8 flex items-center justify-between gap-4 md:gap-8 shadow-sm transition-colors z-10 ${sidebarClasses[theme]}`}>
-          <div className="flex items-center gap-4">
-            <button onClick={() => setIsSidebarOpen(true)} className="lg:hidden p-2 hover:bg-white/5 rounded-lg border border-white/10">
-              <Menu size={24} />
-            </button>
-            <div className="flex items-center gap-3 md:gap-6">
-              <div className="bg-blue-600/10 p-2 md:p-4 rounded-xl md:rounded-3xl text-blue-500 shadow-inner hidden sm:block">
-                <Wallet size={24} className="md:w-8 md:h-8" />
-              </div>
-              <div>
-                <p className="text-slate-500 text-[9px] md:text-[10px] font-black mb-0.5 md:mb-1 uppercase tracking-widest">الراتب</p>
-                <div className="flex items-center gap-1 md:gap-3">
-                  <input 
-                    type="number" 
-                    value={salary}
-                    onChange={(e) => setSalary(Number(e.target.value))}
-                    className="text-xl md:text-3xl font-black bg-transparent border-none focus:ring-0 w-24 md:w-36 outline-none"
-                  />
-                  <span className="text-slate-500 font-bold text-sm md:text-base">ج.م</span>
-                </div>
-              </div>
+        <header className={`p-6 md:p-8 flex items-center justify-between shadow-sm ${sidebarClasses[theme]}`}>
+          <div className="flex flex-col">
+            <span className="text-xs font-black opacity-40 uppercase">الراتب الحالي</span>
+            <div className="flex items-center gap-2">
+              <input type="number" value={salary} onChange={e => {
+                const val = Number(e.target.value);
+                setSalary(val);
+                syncFinancialData({ salary: val });
+              }} className="text-3xl font-black bg-transparent w-32 outline-none focus:text-blue-500 transition-colors" />
+              <span className="font-bold opacity-50">ج.م</span>
             </div>
           </div>
-
-          <div className={`flex items-center gap-4 md:gap-12 p-3 md:p-4 px-4 md:px-8 rounded-2xl md:rounded-[2rem] border ${theme === 'dark-classic' ? 'bg-[#111] border-black' : 'bg-white/5 border-white/10'}`}>
+          <div className="flex gap-4 md:gap-12">
             <div className="text-center">
-              <p className="text-slate-500 text-[8px] md:text-[10px] font-black uppercase mb-0.5 md:mb-1">المصروفات</p>
-              <p className="text-sm md:text-xl font-bold text-red-500">{totalExpensesVal.toLocaleString()}</p>
+              <p className="text-[10px] font-black opacity-40 mb-1">المصروفات</p>
+              <p className="text-xl font-bold text-red-500">{totalExpensesVal.toLocaleString()}</p>
             </div>
-            <div className="h-6 md:h-8 w-px bg-white/10"></div>
             <div className="text-center">
-              <p className="text-slate-500 text-[8px] md:text-[10px] font-black uppercase mb-0.5 md:mb-1">المتبقي</p>
-              <p className={`text-base md:text-3xl font-black ${balance >= 0 ? 'text-green-500' : 'text-red-500'}`}>
-                {balance.toLocaleString()}
-              </p>
+              <p className="text-[10px] font-black opacity-40 mb-1">المتبقي</p>
+              <p className={`text-3xl font-black ${balance >= 0 ? 'text-green-500' : 'text-red-500'}`}>{balance.toLocaleString()}</p>
             </div>
           </div>
         </header>
 
-        {/* View Content */}
-        <div className="flex-1 overflow-y-auto p-4 md:p-10 max-w-7xl mx-auto w-full">
-          
+        <div className="flex-1 overflow-y-auto p-6 md:p-10">
           {activeTab === AppTab.MONTHLY_EXPENSES && (
             <div className="animate-in fade-in duration-500">
-              <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 mb-6 md:mb-10">
-                <div>
-                  <h2 className="text-2xl md:text-3xl font-black">المصروفات</h2>
-                  <p className="text-xs md:text-sm font-medium opacity-60">إجمالي المصروفات النشطة حالياً</p>
-                </div>
-                <button onClick={() => setIsExpenseModalOpen(true)} className="w-full sm:w-auto bg-blue-600 text-white px-6 md:px-8 py-3 md:py-4 rounded-xl md:rounded-2xl flex items-center justify-center gap-3 font-bold shadow-lg shadow-blue-600/20 active:scale-95 transition-all">
-                  <Plus size={20} /> أضف مصروف
-                </button>
+              <div className="flex justify-between items-center mb-10">
+                <h2 className="text-2xl md:text-3xl font-black">المصروفات النشطة ({userExpensesCount})</h2>
+                <button onClick={() => setIsExpenseModalOpen(true)} className="bg-blue-600 text-white px-6 py-3 rounded-xl font-bold flex items-center gap-2"><Plus size={20}/> أضف مصروف</button>
               </div>
-
-              <div className="grid gap-3 md:gap-6">
-                {userExpenses.length === 0 ? (
-                  <div className="py-20 text-center opacity-30 flex flex-col items-center">
-                    <TrendingDown size={48} className="mb-4" />
-                    <p className="font-bold">لا يوجد مصروفات حالية</p>
-                  </div>
-                ) : (
-                  userExpenses.map(exp => (
-                    <div key={exp.id} className={`p-4 md:p-6 rounded-2xl md:rounded-3xl border flex flex-col sm:flex-row items-start sm:items-center justify-between group border-r-4 md:border-r-8 border-r-blue-500 transition-all gap-4 ${cardClasses[theme]}`}>
-                      <div className="flex items-center gap-4 md:gap-6">
-                        <div className={`p-3 md:p-4 rounded-xl md:rounded-2xl ${theme === 'dark-classic' ? 'bg-[#111]' : 'bg-slate-100'}`}>
-                          <TrendingDown size={20} className="md:w-6 md:h-6" />
-                        </div>
-                        <div>
-                          <h4 className="text-base md:text-lg font-black uppercase tracking-tight">{exp.name}</h4>
-                          <div className="flex gap-2 md:gap-4 text-[10px] md:text-xs font-bold mt-1 md:mt-2 opacity-60">
-                            <span className="bg-white/5 px-2 py-0.5 rounded-full">{exp.category}</span>
-                            <span className="flex items-center gap-1"><Calendar size={10} /> {exp.dueDate}</span>
-                          </div>
-                        </div>
-                      </div>
-                      <div className="flex items-center justify-between sm:justify-end w-full sm:w-auto gap-4 md:gap-8">
-                        <span className="text-xl md:text-2xl font-black">{exp.value.toLocaleString()} ج.م</span>
-                        <div className="flex gap-2">
-                          <button onClick={() => togglePaidExpense(exp.id)} className="p-2 md:p-3 bg-green-500/10 text-green-500 rounded-lg md:rounded-2xl hover:bg-green-500 hover:text-white transition-all">
-                            <CheckCircle2 size={20} className="md:w-6 md:h-6" />
-                          </button>
-                          <button onClick={() => setExpenses(expenses.filter(e => e.id !== exp.id))} className="p-2 md:p-3 bg-red-500/10 text-red-500 rounded-lg md:rounded-2xl hover:bg-red-500 hover:text-white transition-all">
-                            <Trash2 size={20} className="md:w-6 md:h-6" />
-                          </button>
-                        </div>
+              <div className="grid gap-4">
+                {expenses.filter(e => !e.isPaid).map(exp => (
+                  <div key={exp.id} className={`p-6 rounded-3xl border border-r-8 border-r-blue-500 flex items-center justify-between ${cardClasses[theme]}`}>
+                    <div className="flex items-center gap-4">
+                      <TrendingDown className="opacity-20" size={32}/>
+                      <div>
+                        <h4 className="font-black text-lg">{exp.name}</h4>
+                        <p className="text-xs opacity-50">{exp.category} | {exp.dueDate}</p>
                       </div>
                     </div>
-                  ))
-                )}
+                    <div className="flex items-center gap-6">
+                      <span className="text-xl font-black">{exp.value.toLocaleString()} ج.م</span>
+                      <button onClick={() => deleteExpense(exp.id)} className="p-3 text-red-500 hover:bg-red-500/10 rounded-xl transition-all"><Trash2 size={24}/></button>
+                    </div>
+                  </div>
+                ))}
               </div>
             </div>
           )}
 
           {activeTab === AppTab.COMMITMENTS && (
             <div className="animate-in fade-in duration-500">
-              <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 mb-6 md:mb-10">
-                <h2 className="text-2xl md:text-3xl font-black">الالتزامات والأقساط</h2>
-                <button onClick={() => { setSelectedCategory(COMMITMENT_TYPES[0]); setIsCommitmentModalOpen(true); }} className="w-full sm:w-auto bg-emerald-600 text-white px-6 md:px-8 py-3 md:py-4 rounded-xl md:rounded-2xl flex items-center justify-center gap-3 font-bold shadow-lg shadow-emerald-600/20 active:scale-95 transition-all">
-                  <Plus size={20} /> أضف التزام
-                </button>
+               <div className="flex justify-between items-center mb-10">
+                <h2 className="text-2xl md:text-3xl font-black">الالتزامات</h2>
+                <button onClick={() => setIsCommitmentModalOpen(true)} className="bg-emerald-600 text-white px-6 py-3 rounded-xl font-bold flex items-center gap-2"><Plus size={20}/> أضف التزام</button>
               </div>
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 md:gap-6 mb-12">
+              <div className="grid md:grid-cols-2 gap-6">
                 {commitments.map(com => (
-                  <div key={com.id} className={`p-6 md:p-8 rounded-2xl md:rounded-[2.5rem] border flex flex-col gap-4 md:gap-6 relative overflow-hidden transition-all ${cardClasses[theme]} ${com.isCompleted ? 'opacity-40 grayscale' : ''}`}>
-                    <div className="flex items-center justify-between z-10">
-                      <div className="flex items-center gap-3 md:gap-5">
-                        <div className="bg-emerald-500/10 p-3 md:p-4 rounded-xl md:rounded-3xl text-emerald-500"><ShieldCheck size={24} className="md:w-8 md:h-8" /></div>
-                        <div>
-                          <h4 className="text-lg md:text-xl font-black">{com.type}</h4>
-                          <p className="text-xs md:text-sm font-bold mt-1 opacity-60">{com.duration} | {com.date}</p>
-                        </div>
-                      </div>
-                      <div className="flex gap-2">
-                        {!com.isCompleted && (
-                          <button onClick={() => payCommitmentInstallment(com.id)} className="bg-emerald-600 text-white px-3 md:px-5 py-1.5 md:py-2 rounded-lg md:rounded-xl font-black text-[10px] md:text-sm">دفع قسط</button>
-                        )}
-                        <button onClick={() => deleteCommitment(com.id)} className="p-2 text-red-400"><Trash2 size={16} /></button>
-                      </div>
+                  <div key={com.id} className={`p-8 rounded-[2rem] border relative overflow-hidden ${cardClasses[theme]}`}>
+                    <div className="flex justify-between items-start mb-6">
+                      <ShieldCheck className="text-emerald-500" size={32}/>
+                      <button onClick={() => {
+                        const updated = commitments.filter(c => c.id !== com.id);
+                        setCommitments(updated);
+                        syncFinancialData({ commitments: updated });
+                      }} className="text-red-400 p-2"><Trash2 size={18}/></button>
                     </div>
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 md:gap-6 z-10">
-                      {[
-                        { label: 'الإجمالي', value: com.totalValue, color: 'opacity-50' },
-                        { label: 'المدفوع', value: com.paidAmount, color: 'text-blue-400', bg: 'bg-blue-500/10' },
-                        { label: 'المتبقي', value: com.remainingAmount, color: 'text-red-400', bg: 'bg-red-500/10' },
-                        { label: 'الأقساط', value: com.installmentsCount, color: 'opacity-50' }
-                      ].map((stat, i) => (
-                        <div key={i} className={`p-3 md:p-4 rounded-xl md:rounded-2xl text-center ${stat.bg || 'bg-white/5'}`}>
-                          <p className={`text-[8px] md:text-[10px] font-black uppercase mb-0.5 md:mb-1 ${stat.color}`}> {stat.label} </p>
-                          <p className={`text-sm md:text-lg font-black ${stat.color}`}> {stat.value.toLocaleString()} </p>
-                        </div>
-                      ))}
+                    <h4 className="text-xl font-black mb-1">{com.type}</h4>
+                    <p className="text-sm opacity-50 mb-6">{com.duration} | المتبقي: {com.remainingAmount.toLocaleString()}</p>
+                    <div className="w-full bg-white/5 h-2 rounded-full overflow-hidden">
+                      <div className="bg-emerald-500 h-full transition-all" style={{width: `${(com.paidAmount/com.totalValue)*100}%`}}></div>
                     </div>
                   </div>
                 ))}
-              </div>
-              <div className="bg-slate-800 text-white p-6 md:p-10 rounded-2xl md:rounded-[3rem] shadow-2xl flex flex-col md:flex-row items-center justify-around gap-6 md:gap-10">
-                <div className="text-center">
-                  <p className="text-slate-400 font-bold mb-1 md:mb-2 text-sm md:text-base">إجمالي الالتزامات</p>
-                  <p className="text-2xl md:text-4xl font-black">{totalCommitmentValue.toLocaleString()} ج.م</p>
-                </div>
-                <div className="hidden md:block w-px h-16 bg-white/10"></div>
-                <div className="text-center">
-                  <p className="text-slate-400 font-bold mb-1 md:mb-2 text-sm md:text-base">المتبقي الصافي</p>
-                  <p className="text-2xl md:text-4xl font-black text-emerald-400">{totalCommitmentRemaining.toLocaleString()} ج.م</p>
-                </div>
               </div>
             </div>
           )}
 
           {activeTab === AppTab.SETTINGS && (
             <div className="animate-in fade-in duration-500">
-              <h2 className="text-2xl md:text-3xl font-black mb-6 md:mb-10">الإعدادات والأمان</h2>
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 md:gap-10">
-                <div className={`p-6 md:p-8 rounded-2xl md:rounded-[2.5rem] border ${cardClasses[theme]}`}>
-                  <div className="flex items-center justify-between mb-6 md:mb-8">
-                    <div className="flex items-center gap-3">
-                      <UserCircle className="text-blue-500" size={24}/>
-                      <h3 className="text-lg md:text-xl font-black">إدارة الحسابات</h3>
-                    </div>
-                    {currentUser.isAdmin && (
-                      <button onClick={() => setIsSettingsUserModalOpen(true)} className="bg-blue-600 text-white p-2 rounded-lg">
-                        <UserPlus size={18} />
-                      </button>
-                    )}
-                  </div>
-                  <div className="space-y-3 mb-8 md:mb-10">
-                    {users.map(u => (
-                      <div key={u.id} className="flex items-center justify-between p-3 md:p-4 bg-white/5 rounded-xl md:rounded-2xl border border-white/5">
-                        <div className="flex items-center gap-3">
-                          <p className="font-black text-sm md:text-base">{u.username}</p>
-                          {u.isAdmin && <span className="bg-blue-600 text-[8px] md:text-[9px] px-2 py-0.5 rounded-full uppercase font-black text-white tracking-widest">Admin</span>}
-                        </div>
-                        {currentUser.isAdmin && u.username !== 'admin' && (
-                          <button onClick={() => setUsers(users.filter(usr => usr.id !== u.id))} className="text-red-400 hover:text-red-600 p-1"><Trash2 size={16} /></button>
-                        )}
-                      </div>
+               <h2 className="text-3xl font-black mb-10">الإعدادات</h2>
+               <div className="grid md:grid-cols-2 gap-8">
+                 <div className={`p-8 rounded-[2rem] border ${cardClasses[theme]}`}>
+                   <h3 className="font-black text-xl mb-6 flex items-center gap-2"><Palette size={20}/> مظهر البرنامج</h3>
+                   <div className="grid grid-cols-2 gap-3">
+                    {['modern-light', 'dark-classic', 'deep-ocean', 'royal-gold'].map(t => (
+                      <button key={t} onClick={() => {
+                        setTheme(t as ThemeType);
+                        syncFinancialData({ theme: t });
+                      }} className={`p-4 rounded-2xl border-2 transition-all font-bold text-sm ${theme === t ? 'border-blue-500 bg-blue-500/10' : 'border-white/5 hover:bg-white/5'}`}>{t}</button>
                     ))}
-                  </div>
-
-                  <div className="pt-6 md:pt-8 border-t border-white/5">
-                    <h4 className="text-xs md:text-sm font-black mb-4 flex items-center gap-2"><KeyRound size={16}/> كلمة المرور</h4>
-                    <div className="flex flex-col sm:flex-row gap-2">
-                      <input 
-                        type="password" 
-                        value={newPassword}
-                        onChange={(e) => setNewPassword(e.target.value)}
-                        placeholder="كلمة مرور جديدة"
-                        className="flex-1 bg-white/5 border border-white/10 rounded-xl p-3 outline-none focus:ring-2 focus:ring-blue-500 text-sm"
-                      />
-                      <button onClick={handleChangePassword} className="bg-blue-600 text-white px-6 py-3 rounded-xl font-bold text-sm">تحديث</button>
-                    </div>
-                  </div>
-                </div>
-
-                <div className={`p-6 md:p-8 rounded-2xl md:rounded-[2.5rem] border ${cardClasses[theme]}`}>
-                  <div className="flex items-center gap-3 mb-6 md:mb-8">
-                    <Palette className="text-blue-500" size={24}/>
-                    <h3 className="text-lg md:text-xl font-black">مظهر البرنامج</h3>
-                  </div>
-                  <div className="grid grid-cols-2 gap-3 md:gap-4">
-                    {[
-                      { id: 'modern-light', label: 'فاتح', icon: Sun, color: 'bg-white' },
-                      { id: 'dark-classic', label: 'أسود', icon: Moon, color: 'bg-black' },
-                      { id: 'deep-ocean', label: 'المحيط', icon: Laptop, color: 'bg-[#0f172a]' },
-                      { id: 'royal-gold', label: 'ذهبي', icon: Leaf, color: 'bg-[#1c1917]' }
-                    ].map(t => (
-                      <button 
-                        key={t.id}
-                        onClick={() => setTheme(t.id as ThemeType)}
-                        className={`p-4 md:p-6 rounded-2xl md:rounded-3xl border-2 transition-all flex flex-col items-center gap-2 md:gap-3 ${theme === t.id ? 'border-blue-500 bg-blue-500/10' : 'border-white/5 hover:bg-white/5'}`}
-                      >
-                        <div className={`w-8 h-8 md:w-12 md:h-12 rounded-xl md:rounded-2xl shadow-inner ${t.color} flex items-center justify-center border border-white/10`}>
-                          <t.icon size={18} className={theme === t.id ? 'text-blue-500' : 'opacity-40'} />
-                        </div>
-                        <span className="font-bold text-[10px] md:text-sm">{t.label}</span>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {activeTab === AppTab.PREVIOUS_MONTHS && (
-            <div className="animate-in fade-in duration-500">
-              <h2 className="text-2xl md:text-3xl font-black mb-6 md:mb-10 text-right">الأرشيف</h2>
-              {history.length === 0 ? (
-                <div className="bg-white/5 border-2 md:border-4 border-dashed border-white/5 rounded-2xl md:rounded-[3rem] py-16 md:py-24 text-center">
-                  <Archive size={48} className="opacity-20 mx-auto mb-4 md:mb-6" />
-                  <p className="opacity-40 font-black text-lg md:text-xl">الأرشيف فارغ حالياً</p>
-                </div>
-              ) : (
-                <div className="space-y-6 md:space-y-8">
-                  {history.map(record => (
-                    <div key={record.id} className={`rounded-2xl md:rounded-[2.5rem] shadow-sm overflow-hidden border ${cardClasses[theme]}`}>
-                      <div className="bg-blue-600 p-4 md:p-6 flex justify-between items-center text-white">
-                        <h4 className="text-lg md:text-xl font-black">{record.monthName}</h4>
-                        <span className="bg-white/20 px-3 md:px-4 py-1 md:py-2 rounded-lg md:rounded-xl text-xs md:text-sm font-bold">الراتب: {record.salary.toLocaleString()}</span>
-                      </div>
-                      <div className="p-4 md:p-8 grid grid-cols-1 md:grid-cols-2 gap-6 md:gap-10">
-                        <div className="space-y-1.5 md:space-y-2">
-                          <p className="text-[10px] font-black opacity-30 uppercase tracking-widest mb-2">التفاصيل</p>
-                          {record.expenses.map(e => (
-                            <div key={e.id} className="flex justify-between text-xs md:text-sm py-1.5 border-b border-white/5 font-bold">
-                              <span>{e.name}</span>
-                              <span className="opacity-60">{e.value.toLocaleString()} ج.م</span>
-                            </div>
-                          ))}
-                        </div>
-                        <div className="bg-white/5 p-4 md:p-6 rounded-2xl md:rounded-3xl text-center flex flex-col justify-center">
-                          <div className="mb-4">
-                            <p className="text-[10px] md:text-sm opacity-50 mb-0.5 md:mb-1">المصروفات</p>
-                            <p className="text-xl md:text-3xl font-black text-red-500">{record.totalExpenses.toLocaleString()}</p>
-                          </div>
-                          <div className="h-px bg-white/5 w-1/2 mx-auto mb-4"></div>
-                          <div>
-                            <p className="text-[10px] md:text-sm opacity-50 mb-0.5 md:mb-1">المتبقي</p>
-                            <p className="text-xl md:text-3xl font-black text-green-500">{(record.salary - record.totalExpenses).toLocaleString()}</p>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
+                   </div>
+                 </div>
+                 <div className={`p-8 rounded-[2rem] border ${cardClasses[theme]}`}>
+                   <h3 className="font-black text-xl mb-6 flex items-center gap-2"><KeyRound size={20}/> الأمان</h3>
+                   <div className="space-y-4">
+                     <div className="text-sm opacity-60">اسم المستخدم: {currentUser.username}</div>
+                     <input type="password" value={newPassword} onChange={e => setNewPassword(e.target.value)} placeholder="كلمة مرور جديدة" className="w-full bg-white/5 p-4 rounded-xl border border-white/5 outline-none focus:ring-1 focus:ring-blue-500" />
+                     <button onClick={() => {
+                        if (!newPassword) return;
+                        update(ref(db, `users/${currentUser.id}`), { password: newPassword });
+                        setNewPassword('');
+                        alert('تم التحديث بنجاح');
+                     }} className="bg-blue-600 text-white w-full py-3 rounded-xl font-bold">تغيير كلمة المرور</button>
+                   </div>
+                 </div>
+               </div>
             </div>
           )}
         </div>
       </main>
 
-      {/* Floating Chat */}
-      <div className="fixed bottom-4 md:bottom-8 left-4 md:left-8 z-[100]">
+      {/* Floating Advanced Chat */}
+      <div className="fixed bottom-8 left-8 z-[100]">
         {!isChatOpen ? (
-          <button onClick={() => setIsChatOpen(true)} className="w-14 h-14 md:w-16 md:h-16 bg-blue-600 text-white rounded-full shadow-2xl flex items-center justify-center hover:scale-110 active:scale-95 transition-all">
-            <MessageCircle size={28} className="md:w-8 md:h-8" />
+          <button onClick={() => setIsChatOpen(true)} className="w-16 h-16 bg-blue-600 text-white rounded-full shadow-2xl flex items-center justify-center hover:scale-110 active:scale-95 transition-all">
+            <MessageCircle size={32} />
           </button>
         ) : (
-          <div className={`w-[calc(100vw-2rem)] sm:w-80 md:w-96 h-[400px] md:h-[500px] rounded-2xl md:rounded-[2rem] shadow-2xl flex flex-col overflow-hidden border animate-in slide-in-from-bottom-5 ${cardClasses[theme]}`}>
-            <div className="bg-blue-600 p-4 md:p-5 text-white flex justify-between items-center">
-              <span className="font-black flex items-center gap-2 text-sm md:text-base"><MessageCircle size={20}/> محادثة عامة</span>
+          <div className={`w-[calc(100vw-2rem)] sm:w-96 h-[550px] rounded-[2rem] shadow-2xl flex flex-col overflow-hidden border animate-in slide-in-from-bottom-5 ${cardClasses[theme]}`}>
+            <div className="bg-blue-600 p-5 text-white flex justify-between items-center">
+              <div className="flex items-center gap-2 font-black">
+                <MessageCircle size={20}/>
+                <span>{chatRecipient === 'all' ? 'المحادثة العامة' : `خاص مع ${users.find(u => u.id === chatRecipient)?.username || 'مستخدم'}`}</span>
+              </div>
               <button onClick={() => setIsChatOpen(false)} className="bg-white/20 p-1 rounded-lg"><X size={18}/></button>
             </div>
-            <div className="flex-1 overflow-y-auto p-4 md:p-5 space-y-4 bg-white/5">
-              {messages.map(msg => (
-                <div key={msg.id} className={`flex flex-col ${msg.fromUserId === currentUser.id ? 'items-end' : 'items-start'}`}>
-                  <span className="text-[9px] font-black opacity-40 px-2 mb-0.5 uppercase tracking-tighter">{msg.fromUsername}</span>
-                  <div className={`p-3 md:p-4 rounded-xl md:rounded-2xl max-w-[85%] text-[13px] md:text-sm font-bold ${msg.fromUserId === currentUser.id ? 'bg-blue-600 text-white rounded-tr-none' : 'bg-white/10 text-inherit rounded-tl-none'}`}>
+
+            {/* Recipient Selection Bar */}
+            <div className="p-3 bg-white/5 border-b border-white/5 flex gap-2 overflow-x-auto scrollbar-hide">
+              <button onClick={() => setChatRecipient('all')} className={`px-4 py-2 rounded-full text-[10px] font-black uppercase whitespace-nowrap transition-all ${chatRecipient === 'all' ? 'bg-blue-600 text-white' : 'bg-white/10 opacity-50'}`}>الكل</button>
+              {users.filter(u => u.id !== currentUser.id).map(u => (
+                <button key={u.id} onClick={() => setChatRecipient(u.id)} className={`px-4 py-2 rounded-full text-[10px] font-black uppercase whitespace-nowrap transition-all ${chatRecipient === u.id ? 'bg-blue-600 text-white' : 'bg-white/10 opacity-50'}`}>{u.username}</button>
+              ))}
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-5 space-y-4 bg-white/5">
+              {filteredMessages.map(msg => (
+                <div key={msg.id} className={`flex flex-col group ${msg.fromUserId === currentUser.id ? 'items-end' : 'items-start'}`}>
+                  <div className="flex items-center gap-2 mb-1 px-2">
+                    <span className="text-[9px] font-black opacity-30 uppercase">{msg.fromUsername}</span>
+                    {msg.fromUserId === currentUser.id && (
+                      <button onClick={() => deleteMessage(msg.id)} className="opacity-0 group-hover:opacity-40 hover:!opacity-100 text-red-500 transition-opacity"><Trash2 size={10}/></button>
+                    )}
+                  </div>
+                  <div className={`p-4 rounded-2xl max-w-[85%] text-[13px] font-bold shadow-sm ${msg.fromUserId === currentUser.id ? 'bg-blue-600 text-white rounded-tr-none' : 'bg-white/10 text-inherit rounded-tl-none'}`}>
                     {msg.text}
-                    <p className="text-[8px] mt-1 opacity-50 text-right">{msg.timestamp}</p>
+                    <p className="text-[8px] mt-1 opacity-40 text-left">{msg.timestamp}</p>
                   </div>
                 </div>
               ))}
+              <div ref={chatEndRef} />
             </div>
-            <div className="p-3 md:p-4 bg-white/5 border-t border-white/5">
-              <div className="flex gap-2 mb-2 md:mb-3 overflow-x-auto pb-1 scrollbar-hide">
-                {EMOJIS.map(e => <button key={e} onClick={() => setChatInput(p => p + e)} className="p-1 hover:bg-white/10 rounded text-base md:text-lg">{e}</button>)}
+
+            <div className="p-4 bg-white/5 border-t border-white/5">
+               <div className="flex gap-2 mb-3 overflow-x-auto pb-1 scrollbar-hide">
+                {EMOJIS.map(e => <button key={e} onClick={() => setChatInput(p => p + e)} className="p-1 hover:bg-white/10 rounded text-lg">{e}</button>)}
               </div>
               <div className="flex gap-2">
-                <input className="flex-1 bg-white/5 border-none rounded-lg md:rounded-xl p-2 md:p-3 text-xs md:text-sm outline-none focus:ring-1 focus:ring-blue-500" placeholder="اكتب..." value={chatInput} onChange={(e) => setChatInput(e.target.value)} onKeyPress={(e) => e.key === 'Enter' && sendChatMessage()}/>
-                <button onClick={sendChatMessage} className="bg-blue-600 text-white p-2 md:p-3 rounded-lg md:rounded-xl"><Send size={18}/></button>
+                <input className="flex-1 bg-white/5 border-none rounded-xl p-3 text-sm outline-none focus:ring-1 focus:ring-blue-500" placeholder="اكتب رسالة..." value={chatInput} onChange={(e) => setChatInput(e.target.value)} onKeyPress={(e) => e.key === 'Enter' && sendChatMessage()}/>
+                <button onClick={sendChatMessage} className="bg-blue-600 text-white p-3 rounded-xl hover:scale-105 active:scale-95 transition-all"><Send size={20}/></button>
               </div>
             </div>
           </div>
         )}
       </div>
 
-      {/* Expense Modal */}
+      {/* Expense Modal (Simplified for sync) */}
       {isExpenseModalOpen && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-md z-[110] flex items-center justify-center p-4">
-          <div className={`w-full max-w-lg rounded-2xl md:rounded-[3rem] p-6 md:p-12 shadow-2xl relative border ${cardClasses[theme]}`}>
-            <h3 className="text-xl md:text-2xl font-black mb-6 md:mb-8">إضافة مصروف</h3>
-            <div className="space-y-4 md:space-y-6">
-              <div className="flex gap-2 md:gap-3">
-                <div className="flex-1">
-                  <label className="text-[9px] md:text-[10px] font-black opacity-40 uppercase tracking-widest mb-1 block">الفئة</label>
-                  {!isAddingCustomCategory ? (
-                    <select className="w-full bg-white/5 p-3 md:p-4 rounded-xl md:rounded-2xl border border-white/10 outline-none focus:ring-2 focus:ring-blue-500 text-xs md:text-sm font-bold" value={selectedCategory} onChange={(e) => setSelectedCategory(e.target.value)}>
-                      {DEFAULT_EXPENSE_CATEGORIES.map(c => <option key={c} value={c} className="bg-slate-800">{c}</option>)}
-                    </select>
-                  ) : (
-                    <input className="w-full bg-white/5 p-3 md:p-4 rounded-xl md:rounded-2xl border border-white/10 outline-none focus:ring-2 focus:ring-blue-500 text-xs md:text-sm font-bold" placeholder="فئة جديدة" value={tempExpense.name} onChange={(e) => setTempExpense({...tempExpense, name: e.target.value})} />
-                  )}
-                </div>
-                <button onClick={() => setIsAddingCustomCategory(!isAddingCustomCategory)} className="mt-4 md:mt-5 bg-white/5 p-3 md:p-4 rounded-xl md:rounded-2xl opacity-40 hover:opacity-100">
-                  {isAddingCustomCategory ? <ChevronLeft size={20}/> : <Plus size={20}/>}
-                </button>
+          <div className={`w-full max-w-lg rounded-[2.5rem] p-8 md:p-12 border ${cardClasses[theme]}`}>
+            <h3 className="text-2xl font-black mb-8">إضافة مصروف</h3>
+            <div className="space-y-6">
+              <div className="flex gap-3">
+                <select className="flex-1 bg-white/5 p-4 rounded-xl border border-white/10 outline-none font-bold text-sm" value={selectedCategory} onChange={e => setSelectedCategory(e.target.value)}>
+                  {DEFAULT_EXPENSE_CATEGORIES.map(c => <option key={c} value={c} className="bg-slate-900">{c}</option>)}
+                </select>
+                <button onClick={() => setIsAddingCustomCategory(!isAddingCustomCategory)} className="bg-white/10 p-4 rounded-xl"><Plus size={20}/></button>
               </div>
-              <div>
-                <label className="text-[9px] md:text-[10px] font-black opacity-40 uppercase tracking-widest mb-1 block text-right">القيمة (ج.م)</label>
-                <input type="number" className="w-full bg-white/5 p-4 md:p-5 rounded-xl md:rounded-2xl border border-white/10 outline-none focus:ring-2 focus:ring-blue-500 text-xl md:text-2xl font-black text-blue-500" value={tempExpense.value} onChange={(e) => setTempExpense({...tempExpense, value: e.target.value})} />
-              </div>
-              <div>
-                <label className="text-[9px] md:text-[10px] font-black opacity-40 uppercase tracking-widest mb-1 block">موعد السداد</label>
-                <input type="date" className="w-full bg-white/5 p-3 md:p-4 rounded-xl md:rounded-2xl border border-white/10 outline-none focus:ring-2 focus:ring-blue-500 text-xs md:text-sm font-bold" value={tempExpense.date} onChange={(e) => setTempExpense({...tempExpense, date: e.target.value})} />
-              </div>
-              <div className="flex gap-2 md:gap-4 pt-4 md:pt-6">
-                <button onClick={handleAddExpense} className="flex-1 bg-blue-600 text-white py-3 md:py-5 rounded-xl md:rounded-2xl font-black shadow-lg text-sm md:text-base">تأكيد</button>
-                <button onClick={() => setIsExpenseModalOpen(false)} className="flex-1 bg-white/10 py-3 md:py-5 rounded-xl md:rounded-2xl font-black text-sm md:text-base">إلغاء</button>
+              {isAddingCustomCategory && <input placeholder="اسم المصروف المخصص" className="w-full bg-white/5 p-4 rounded-xl border border-white/10 outline-none font-bold" value={tempExpense.name} onChange={e => setTempExpense({...tempExpense, name: e.target.value})} />}
+              <input type="number" placeholder="القيمة" className="w-full bg-white/5 p-4 rounded-xl border border-white/10 outline-none font-black text-2xl text-blue-500" value={tempExpense.value} onChange={e => setTempExpense({...tempExpense, value: e.target.value})} />
+              <input type="date" className="w-full bg-white/5 p-4 rounded-xl border border-white/10 outline-none font-bold" value={tempExpense.date} onChange={e => setTempExpense({...tempExpense, date: e.target.value})} />
+              <div className="flex gap-4 pt-4">
+                <button onClick={handleAddExpense} className="flex-1 bg-blue-600 text-white py-4 rounded-2xl font-black">تأكيد</button>
+                <button onClick={() => setIsExpenseModalOpen(false)} className="flex-1 bg-white/10 py-4 rounded-2xl font-black">إلغاء</button>
               </div>
             </div>
           </div>
         </div>
       )}
 
-      {/* Commitment Modal */}
+      {/* Commitment Modal (Simplified for sync) */}
       {isCommitmentModalOpen && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-md z-[110] flex items-center justify-center p-4">
-          <div className={`w-full max-w-xl rounded-2xl md:rounded-[3rem] p-6 md:p-12 shadow-2xl overflow-y-auto max-h-[90vh] border ${cardClasses[theme]}`}>
-            <h3 className="text-xl md:text-2xl font-black mb-6 md:mb-8 text-right">التزام جديد</h3>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
-              <div className="space-y-1">
-                <label className="text-[9px] md:text-[10px] font-black opacity-40 uppercase">النوع</label>
-                <select className="w-full bg-white/5 p-3 md:p-4 rounded-xl outline-none focus:ring-2 focus:ring-emerald-500 text-xs md:text-sm font-bold" value={tempCommitment.type} onChange={(e) => setTempCommitment({...tempCommitment, type: e.target.value})}>
-                  {COMMITMENT_TYPES.map(c => <option key={c} value={c} className="bg-slate-800">{c}</option>)}
-                </select>
-              </div>
-              <div className="space-y-1">
-                <label className="text-[9px] md:text-[10px] font-black opacity-40 uppercase">القيمة الإجمالية</label>
-                <input type="number" className="w-full bg-white/5 p-3 md:p-4 rounded-xl outline-none focus:ring-2 focus:ring-emerald-500 text-xs md:text-sm font-black" value={tempCommitment.totalValue} onChange={(e) => setTempCommitment({...tempCommitment, totalValue: e.target.value})} />
-              </div>
-              <div className="space-y-1">
-                <label className="text-[9px] md:text-[10px] font-black opacity-40 uppercase">الأقساط</label>
-                <input type="number" className="w-full bg-white/5 p-3 md:p-4 rounded-xl outline-none focus:ring-2 focus:ring-emerald-500 text-xs md:text-sm font-black" value={tempCommitment.installmentsCount} onChange={(e) => setTempCommitment({...tempCommitment, installmentsCount: e.target.value})} />
-              </div>
-              <div className="space-y-1">
-                <label className="text-[9px] md:text-[10px] font-black opacity-40 uppercase">التاريخ</label>
-                <input type="date" className="w-full bg-white/5 p-3 md:p-4 rounded-xl outline-none focus:ring-2 focus:ring-emerald-500 text-xs md:text-sm font-black" value={tempCommitment.date} onChange={(e) => setTempCommitment({...tempCommitment, date: e.target.value})} />
-              </div>
-            </div>
-            <div className="mt-8 flex gap-2 md:gap-4">
-              <button onClick={handleAddCommitment} className="flex-1 bg-emerald-600 text-white py-3 md:py-5 rounded-xl md:rounded-2xl font-black text-sm md:text-base">إضافة</button>
-              <button onClick={() => setIsCommitmentModalOpen(false)} className="flex-1 bg-white/10 py-3 md:py-5 rounded-xl md:rounded-2xl font-black text-sm md:text-base">إلغاء</button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* User Creation Modal */}
-      {isSettingsUserModalOpen && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-md z-[110] flex items-center justify-center p-4">
-          <div className={`w-full max-w-md rounded-2xl md:rounded-[3rem] p-8 md:p-12 shadow-2xl border ${cardClasses[theme]}`}>
-            <h3 className="text-xl md:text-2xl font-black mb-6 md:mb-8 text-right">مستخدم جديد</h3>
-            <div className="space-y-4 md:space-y-6">
-              <input className="w-full bg-white/5 p-3 md:p-4 rounded-xl outline-none focus:ring-2 focus:ring-blue-500 font-bold text-sm" placeholder="اسم المستخدم" onChange={(e) => setEditUserForm({...editUserForm, username: e.target.value})} />
-              <input type="password" className="w-full bg-white/5 p-3 md:p-4 rounded-xl outline-none focus:ring-2 focus:ring-blue-500 font-bold text-sm" placeholder="كلمة المرور" onChange={(e) => setEditUserForm({...editUserForm, password: e.target.value})} />
-              <div className="flex gap-2 md:gap-4">
-                <button onClick={() => {
-                  if (editUserForm.username && editUserForm.password) {
-                    setUsers([...users, { id: Date.now().toString(), username: editUserForm.username, password: editUserForm.password, isAdmin: false }]);
-                    setIsSettingsUserModalOpen(false);
-                    setEditUserForm({});
-                  }
-                }} className="flex-1 bg-blue-600 text-white py-3 md:py-4 rounded-xl md:rounded-2xl font-black text-sm md:text-base">إضافة</button>
-                <button onClick={() => setIsSettingsUserModalOpen(false)} className="flex-1 bg-white/10 py-3 md:py-4 rounded-xl md:rounded-2xl font-black text-sm md:text-base">إلغاء</button>
+          <div className={`w-full max-w-lg rounded-[2.5rem] p-8 md:p-12 border ${cardClasses[theme]}`}>
+            <h3 className="text-2xl font-black mb-8">إضافة التزام</h3>
+            <div className="space-y-4">
+              <select className="w-full bg-white/5 p-4 rounded-xl border border-white/10 outline-none font-bold" value={tempCommitment.type} onChange={e => setTempCommitment({...tempCommitment, type: e.target.value})}>
+                {COMMITMENT_TYPES.map(c => <option key={c} value={c} className="bg-slate-900">{c}</option>)}
+              </select>
+              <input type="number" placeholder="القيمة الإجمالية" className="w-full bg-white/5 p-4 rounded-xl border border-white/10 outline-none font-bold" value={tempCommitment.totalValue} onChange={e => setTempCommitment({...tempCommitment, totalValue: e.target.value})} />
+              <input type="number" placeholder="الأقساط" className="w-full bg-white/5 p-4 rounded-xl border border-white/10 outline-none font-bold" value={tempCommitment.installmentsCount} onChange={e => setTempCommitment({...tempCommitment, installmentsCount: e.target.value})} />
+              <input placeholder="المدة (مثلاً: 12 شهر)" className="w-full bg-white/5 p-4 rounded-xl border border-white/10 outline-none font-bold" value={tempCommitment.duration} onChange={e => setTempCommitment({...tempCommitment, duration: e.target.value})} />
+              <div className="flex gap-4 pt-4">
+                <button onClick={handleAddCommitment} className="flex-1 bg-emerald-600 text-white py-4 rounded-2xl font-black">إضافة</button>
+                <button onClick={() => setIsCommitmentModalOpen(false)} className="flex-1 bg-white/10 py-4 rounded-2xl font-black">إلغاء</button>
               </div>
             </div>
           </div>
