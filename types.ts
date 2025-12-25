@@ -54,4 +54,4 @@ export enum AppTab {
   SETTINGS = 'settings'
 }
 
-export type ThemeType = 'light' | 'dark' | 'midnight' | 'emerald';
+export type ThemeType = 'dark-classic' | 'modern-light' | 'deep-ocean' | 'royal-gold';
