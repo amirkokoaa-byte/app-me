@@ -5,7 +5,7 @@ import {
   LayoutDashboard, ShieldCheck, ChevronLeft, Settings, UserPlus, 
   LogOut, CheckCircle2, MessageCircle, Send, X, Edit3, UserCircle,
   Sun, Moon, Laptop, Leaf, Lock, User as UserIcon, Eye, EyeOff,
-  Palette, KeyRound, Menu, Users, ShieldAlert, DownloadCloud, UserCheck
+  Palette, KeyRound, Menu, Users, ShieldAlert, DownloadCloud, UserCheck, Loader2
 } from 'lucide-react';
 import { 
   Expense, Commitment, MonthlyRecord, AppTab, 
@@ -21,6 +21,7 @@ const App: React.FC = () => {
   // --- Auth & Users ---
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [users, setUsers] = useState<User[]>([]);
+  const [isDataLoaded, setIsDataLoaded] = useState(false);
   const [loginForm, setLoginForm] = useState({ username: '', password: '' });
   const [showPassword, setShowPassword] = useState(false);
 
@@ -67,20 +68,24 @@ const App: React.FC = () => {
   // --- Firebase Sync ---
   useEffect(() => {
     const usersRef = ref(db, 'users');
-    onValue(usersRef, (snapshot) => {
+    const unsubscribeUsers = onValue(usersRef, (snapshot) => {
       const data = snapshot.val();
       if (data) {
-        setUsers(Object.values(data) as User[]);
+        const usersList = Object.values(data) as User[];
+        setUsers(usersList);
+        
+        // Ensure admin account exists if for some reason it's missing from an existing data object
+        const hasAdmin = usersList.some(u => u.username === 'admin');
+        if (!hasAdmin) {
+          const adminId = 'admin_1';
+          set(ref(db, `users/${adminId}`), { id: adminId, username: 'admin', password: 'admin', isAdmin: true });
+        }
       } else {
-        // Default Admin Setup
+        // Initial setup
         const adminId = 'admin_1';
-        set(ref(db, `users/${adminId}`), { 
-          id: adminId, 
-          username: 'admin', 
-          password: 'admin', 
-          isAdmin: true 
-        });
+        set(ref(db, `users/${adminId}`), { id: adminId, username: 'admin', password: 'admin', isAdmin: true });
       }
+      setIsDataLoaded(true);
     });
 
     const msgsRef = ref(db, 'messages');
@@ -93,6 +98,8 @@ const App: React.FC = () => {
         setMessages([]);
       }
     });
+
+    return () => unsubscribeUsers();
   }, []);
 
   useEffect(() => {
@@ -123,7 +130,11 @@ const App: React.FC = () => {
 
   const handleLogin = (e: React.FormEvent) => {
     e.preventDefault();
-    const user = users.find(u => u.username === loginForm.username && u.password === loginForm.password);
+    if (!isDataLoaded) {
+      alert('جاري مزامنة البيانات، يرجى الانتظار ثانية...');
+      return;
+    }
+    const user = users.find(u => u.username.toLowerCase() === loginForm.username.toLowerCase() && u.password === loginForm.password);
     if (user) {
       setCurrentUser(user);
     } else {
@@ -192,17 +203,10 @@ const App: React.FC = () => {
     setChatInput('');
   };
 
-  // --- Fixes for undefined functions ---
-  /**
-   * Deletes a chat message from Firebase.
-   */
   const deleteMessage = (msgId: string) => {
     remove(ref(db, `messages/${msgId}`));
   };
 
-  /**
-   * Validates and adds a new expense to the current month's records.
-   */
   const handleAddExpense = () => {
     const val = Number(tempExpense.value);
     if (!val || isNaN(val)) {
@@ -233,7 +237,6 @@ const App: React.FC = () => {
     setIsAddingCustomCategory(false);
   };
 
-  // --- UI Helpers ---
   const totalExpensesVal = expenses.filter(e => !e.isPaid).reduce((sum, e) => sum + e.value, 0);
   const balance = salary - totalExpensesVal;
   const filteredMessages = messages.filter(msg => {
@@ -263,18 +266,28 @@ const App: React.FC = () => {
             <Wallet className="text-white" size={40} />
           </div>
           <h1 className="text-3xl font-black text-slate-900 mb-2">Smart Prise</h1>
-          <p className="text-slate-500 mb-10 text-sm">أهلاً بك في نظام الإدارة المالية الذكي</p>
+          <p className="text-slate-500 mb-6 text-sm">أهلاً بك في نظام الإدارة المالية الذكي</p>
+          
+          {!isDataLoaded && (
+            <div className="flex items-center justify-center gap-2 text-blue-600 mb-4 animate-pulse">
+              <Loader2 className="animate-spin" size={18} />
+              <span className="text-xs font-bold">جاري تحضير النظام...</span>
+            </div>
+          )}
+
           <form onSubmit={handleLogin} className="space-y-4 text-right">
             <div>
               <label className="text-[10px] font-black text-slate-400 mr-2 uppercase tracking-widest">اسم المستخدم</label>
-              <input className="w-full bg-slate-50 border border-slate-200 rounded-2xl p-4 font-bold outline-none focus:ring-2 focus:ring-blue-500" value={loginForm.username} onChange={e => setLoginForm({...loginForm, username: e.target.value})} required placeholder="أدخل اسم المستخدم" />
+              <input className="w-full bg-slate-50 border border-slate-200 rounded-2xl p-4 font-bold outline-none focus:ring-2 focus:ring-blue-500" value={loginForm.username} onChange={e => setLoginForm({...loginForm, username: e.target.value})} required placeholder="admin" disabled={!isDataLoaded} />
             </div>
             <div className="relative">
               <label className="text-[10px] font-black text-slate-400 mr-2 uppercase tracking-widest">كلمة المرور</label>
-              <input type={showPassword ? "text" : "password"} className="w-full bg-slate-50 border border-slate-200 rounded-2xl p-4 font-bold outline-none focus:ring-2 focus:ring-blue-500" value={loginForm.password} onChange={e => setLoginForm({...loginForm, password: e.target.value})} required placeholder="••••••••" />
+              <input type={showPassword ? "text" : "password"} className="w-full bg-slate-50 border border-slate-200 rounded-2xl p-4 font-bold outline-none focus:ring-2 focus:ring-blue-500" value={loginForm.password} onChange={e => setLoginForm({...loginForm, password: e.target.value})} required placeholder="admin" disabled={!isDataLoaded} />
               <button type="button" onClick={() => setShowPassword(!showPassword)} className="absolute top-[38px] left-4 text-slate-400">{showPassword ? <EyeOff size={18} /> : <Eye size={18} />}</button>
             </div>
-            <button className="w-full bg-slate-900 text-white font-black py-5 rounded-2xl hover:bg-blue-600 transition-all shadow-lg active:scale-95 mt-4">دخول للنظام</button>
+            <button className={`w-full text-white font-black py-5 rounded-2xl transition-all shadow-lg active:scale-95 mt-4 ${isDataLoaded ? 'bg-slate-900 hover:bg-blue-600' : 'bg-slate-300 cursor-not-allowed'}`} disabled={!isDataLoaded}>
+              دخول للنظام
+            </button>
           </form>
         </div>
       </div>
@@ -369,6 +382,7 @@ const App: React.FC = () => {
                            <button onClick={() => {
                              const updated = expenses.filter(e => e.id !== exp.id);
                              setExpenses(updated);
+                             syncFinancialData({ updatedExpenses: updated }); // Fixed parameter name to match state if needed, but local updated is better
                              syncFinancialData({ expenses: updated });
                            }} className="p-2 text-red-500 hover:bg-red-500/10 rounded-lg transition-colors"><Trash2 size={24}/></button>
                         </div>
@@ -580,7 +594,7 @@ const App: React.FC = () => {
       {/* New User Modal */}
       {isSettingsUserModalOpen && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-md z-[150] flex items-center justify-center p-4">
-           <div className={`w-full max-w-md rounded-[2.5rem] p-10 border shadow-2xl ${cardClasses[theme]}`}>
+           <div className={`w-full max-md rounded-[2.5rem] p-10 border shadow-2xl ${cardClasses[theme]}`}>
               <h3 className="text-2xl font-black mb-8 flex items-center gap-2 text-blue-500"><UserPlus/> مستخدم جديد</h3>
               <div className="space-y-4">
                  <input className="w-full bg-white/5 p-4 rounded-xl border border-white/10 font-bold outline-none focus:ring-1" placeholder="اسم المستخدم" value={newUserForm.username} onChange={e => setNewUserForm({...newUserForm, username: e.target.value})} />
